@@ -12,11 +12,13 @@ action = None
 last_action = None
 df = None
 loop_count = 1
+strategy = None
+last_day = None
 
 
 def setup():
 
-    global client, df
+    global client, df, strategy
 
     # Create client
     logging.info('Pytrade: Creating client.')
@@ -53,10 +55,18 @@ def setup():
             logging.error('There are open positions. Please close them manually to use the bot.')
             quit()
 
+    # Get strategy
+    if DOS:
+        strategy = ut.daily_optimize_strategy(df)
+    else:
+        strategy = STRATEGY
+
+    print(strategy)
+
 
 def loop():
 
-    global df, action, last_action, loop_count
+    global df, action, last_action, loop_count, strategy, last_day
 
     # Get new price data
     logging.info(f'Pytrade: Getting current price data since {FETCH_TIME_START}.')
@@ -69,10 +79,19 @@ def loop():
     new_data = new_data.iloc[:-1, :] # Discard last bar because its not fully closed
     df = pd.concat([df, new_data])
     df.drop_duplicates(inplace=True)
+    df = df.iloc[max(0, len(df) - MAX_BARS):, :] # Keep max bars
+
+    # DOS
+    if DOS:
+        current_day = datetime.strftime(df.index[-1], format='%Y-%m-%d')
+        if current_day != last_day and last_day != None:
+            logging.info(f'Pytrade: Running DOS.')
+            strategy = ut.daily_optimize_strategy(df)
+        last_day = current_day
 
     # Run strategy
-    logging.info(f'Pytrade: Running strategy {STRATEGY}.')
-    st, st_args = ut.get_strategy(STRATEGY)
+    logging.info(f'Pytrade: Running strategy {strategy}.')
+    st, st_args = ut.get_strategy(strategy)
     bt = st(df, *st_args)
     bt.run_strategy()
 
@@ -118,17 +137,22 @@ if __name__ == '__main__':
                 logging.FileHandler(log_file),
                 logging.StreamHandler()])
 
+        # Run setup one time
+        logging.info('Pytrade: Running setup.')
+        setup()
+
         # Info
         logging.info('Pytrade: Starting bot. *******************************************************************')
         logging.info(f'Pytrade: Broker {BROKER}')
         logging.info(f'Pytrade: Testnet {TESTNET}')
+        logging.info(f'Pytrade: DOS Mode {DOS}')
         logging.info(f'Pytrade: Symbol {SYMBOL}')
         logging.info(f'Pytrade: History Data Start Date {STARTDATE}')
         logging.info(f'Pytrade: History Data End Date {ENDDATE}')
         logging.info(f'Pytrade: Interval {INTERVAL}')
         logging.info(f'Pytrade: Fetch Time Start {FETCH_TIME_START}')
         logging.info(f'Pytrade: Fetch Time End {FETCH_TIME_END}')
-        logging.info(f'Pytrade: Strategy {STRATEGY}')
+        logging.info(f'Pytrade: Strategy {strategy}')
         logging.info(f'Pytrade: Leverage {LEVERAGE}')
         logging.info(f'Pytrade: Margin Mode {MARGIN_MODE}')
         logging.info(f'Pytrade: Order Size {ORDER_SIZE}')
@@ -136,9 +160,8 @@ if __name__ == '__main__':
         logging.info(f'Pytrade: Take Profit {TP_PCT * 100}%')
         logging.info(f'Pytrade: Price Precision {PRECISION}')
 
-        # Run setup one time
-        logging.info('Pytrade: Running setup.')
-        setup()
+        # Send startup email
+        ut.send_email('Pytrade started succesfully!', 'Good luck!', [log_file, 'config.py'])
 
         # Run loop
         logging.info('Pytrade: Running in loop mode.')

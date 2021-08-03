@@ -4,6 +4,7 @@ import numpy as np
 import binance as bn
 from constants import RESAMPLE_COL_AGG
 import strategies
+import optimizers as op
 from config import *
 from email_body_templates import *
 import configparser
@@ -286,6 +287,33 @@ def send_email(subject, msg, attachment=None):
         subject=subject,
         contents=msg, 
         attachments=attachment)
+
+
+def daily_optimize_strategy(df):
+
+    # Get daily dates
+    dates = list(set(df.index.date))
+    dates = [datetime.strftime(x, format='%Y-%m-%d') for x in dates]
+    dates.sort()
+    dates = dates[-BACK_DAYS - 1: -1]
+    start_date = dates[0]
+    end_date = dates[-1]
+
+    # Optimize by the previous days
+    prev_days_df = df.loc[start_date:end_date]
+    opt = op.SimpleOptimizer(prev_days_df, DAILY_OPT_STRATEGY,
+        MIN_ARGS, MAX_ARGS, STEP_ARGS)
+    opt.run()
+    opt_df = opt.get_data()['opt_df']
+    try:
+        opt_strategy = opt_df.iloc[0]['STRATEGY_NAME']
+    except Exception as e:
+        logging.warning('PyTrade: Could not optimize strategy. Using default DOS strategy.', e)
+        opt_strategy = DEFAULT_DOS_STRATEGY
+    logging.info(f'PyTrade: Optimized strategy using DOS -> {opt_strategy}.')
+    
+    return opt_strategy
+
     
 
 

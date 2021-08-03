@@ -1,8 +1,10 @@
+from datetime import datetime
 import pandas as pd
 import numpy as np
 import ta
 import matplotlib.pyplot as plt
 import pyfolio as pf
+from config import *
 from IPython.display import display
 
 
@@ -81,6 +83,61 @@ class _BaseStrategy():
         trades = trades.dropna()
         del trades['index']
 
+        if ENABLE_BACKTEST_SLTP:
+            # Calculate prices for stop loss and take profit
+            def calc_sl_tp_price(ser):
+                if ser['ACTION'] == 'BUY':
+                    ser['SL_PRICE'] = ser['PRICE'] * (1 - BACKTEST_SL_PCT)
+                    ser['TP_PRICE'] = ser['PRICE'] * (1 + BACKTEST_TP_PCT)
+                elif ser['ACTION'] == 'SELL':
+                    ser['SL_PRICE'] = ser['PRICE'] * (1 + BACKTEST_SL_PCT)
+                    ser['TP_PRICE'] = ser['PRICE'] * (1 - BACKTEST_TP_PCT)
+                return ser
+            trades = trades.apply(lambda x: calc_sl_tp_price(x), axis=1)
+
+            # Edit post prices for stop loss and take profit
+            def change_post_price_tpsl(ser):
+
+                # Get first prices lower/grater than SL/TP price between the trade duration
+                start_time = ser['DATE']
+                end_time = ser['POST_DATE']
+                sl_prices = pd.DataFrame()
+                tp_prices = pd.DataFrame()
+                if ser['ACTION'] == 'BUY':
+                    sl_prices = self.df.loc[start_time:end_time].loc[self.df['CLOSE'] < ser['SL_PRICE']]
+                    tp_prices = self.df.loc[start_time:end_time].loc[self.df['CLOSE'] > ser['TP_PRICE']]
+                elif ser['ACTION'] == 'SELL':
+                    sl_prices = self.df.loc[start_time:end_time].loc[self.df['CLOSE'] > ser['SL_PRICE']]
+                    tp_prices = self.df.loc[start_time:end_time].loc[self.df['CLOSE'] < ser['TP_PRICE']]
+
+                # See what price was reached first and edit post_price
+                sl_prices['SLTP_TYPE'] = 'SL'
+                tp_prices['SLTP_TYPE'] = 'TP'
+                sltp_prices = pd.concat([sl_prices, tp_prices])
+                ser['SLTP_EXECUTED'] = np.nan
+                if len(sltp_prices) > 0:
+                    sltp_prices = sltp_prices.sort_index(ascending=True)
+                    exit_action = sltp_prices.iloc[0]
+                    if exit_action['SLTP_TYPE'] == 'SL':
+                        ser['POST_PRICE'] = ser['SL_PRICE']
+                    elif exit_action['SLTP_TYPE'] == 'TP':
+                        ser['POST_PRICE'] = ser['TP_PRICE']
+                    # ser['POST_PRICE'] = exit_action['CLOSE']
+                    ser['POST_DATE'] = exit_action.name
+                    ser['SLTP_EXECUTED'] = exit_action['SLTP_TYPE']
+
+                return ser
+            trades = trades.apply(lambda x: change_post_price_tpsl(x), axis=1)
+
+            # Reorder columns
+            try:
+                if len(trades) > 0:
+                    trades = trades[['DATE', 'PRICE', 'ACTION', 
+                                'SL_PRICE', 'TP_PRICE', 'SLTP_EXECUTED',
+                                'POST_DATE', 'POST_PRICE', 'POST_ACTION']]
+            except:
+                pass
+
         # Drop trades that are caused by market neutral actions
         trades = trades[trades['ACTION'] != trades['POST_ACTION']]
         trades = trades[~(trades['ACTION'] == 'NEUTRAL')]
@@ -93,7 +150,7 @@ class _BaseStrategy():
             else:
                 return cost - post_cost
 
-        trades['UNITS'] = 200 / trades['PRICE'] # 200 dollars per trade
+        trades['UNITS'] = BACKTEST_ORDER_SIZE
         trades['COST'] = trades['UNITS'] * trades['PRICE']
         trades['POST_COST'] = trades['UNITS'] * trades['POST_PRICE']
         trades['SUBTOTAL'] = 0
@@ -272,6 +329,43 @@ class DoubleSMACrossover(_BaseStrategy):
         plt.title('BUY/SELL MOMENTS')
 
 
+class DoubleWMACrossover(_BaseStrategy):
+    """n1 is the faster (smaller) WMA window size and 
+       n2 is the slower (larger) WMA window size"""
+    
+    def __init__(self, df, n1, n2):
+        self.df = df
+        self.n1 = n1
+        self.n2 = n2
+
+
+    def _strategy(self):
+
+        # Calculate SMA
+        self.indicator_1 = f'WMA({self.n1})'
+        self.indicator_2 = f'WMA({self.n2})'
+        self.df[self.indicator_1] = ta.trend.WMAIndicator(self.df['CLOSE'], self.n1).wma()
+        self.df[self.indicator_2] = ta.trend.WMAIndicator(self.df['CLOSE'], self.n2).wma()
+
+        # Calculate position
+        self.df['POSITION'] = np.where(self.df[self.indicator_1] > self.df[self.indicator_2], 1, -1)
+
+
+    def _show_results_buy_sell_indicators(self, plot_pos):
+        plt.subplot(plot_pos)
+        plt.plot(self.df['CLOSE'], linewidth=0.5, color='black', label='STOCK')
+        plt.plot(self.df[self.indicator_1], label=self.indicator_1)
+        plt.plot(self.df[self.indicator_2], label=self.indicator_2)
+        plt.scatter(self.df.index, self.df['BUY_PRICE'], 
+            label='BUY', color='green', s=25, marker="^")
+        plt.scatter(self.df.index, self.df['SELL_PRICE'], 
+            label='SELL', color='red', s=25, marker="v")
+        plt.xlabel('TIME')
+        plt.ylabel('CLOSE PRICE')
+        plt.legend()
+        plt.title('BUY/SELL MOMENTS')
+
+
 class TripleSMACrossover(_BaseStrategy):
     """n1 is the faster (smaller) SMA window size and 
        n2 is the normal (mid) SMA window size and
@@ -377,9 +471,9 @@ class MeanReversion(_BaseStrategy):
             -1, np.nan) # short
         self.df['POSITION'] = np.where(self.df['DISTANCE'] <= -self.th,
             1, self.df['POSITION']) # long
-        self.df['POSITION'] = np.where(
-            self.df['DISTANCE'] * self.df['DISTANCE'].shift(1) < 0, 0,
-            self.df['POSITION']) # Go market neutral if no change in sign
+        # self.df['POSITION'] = np.where(
+        #     self.df['DISTANCE'] * self.df['DISTANCE'].shift(1) < 0, 0,
+        #     self.df['POSITION']) # Go market neutral if change in sign
         self.df['POSITION'] = self.df['POSITION'].ffill().fillna(0)
 
     
